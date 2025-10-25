@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
@@ -21,6 +22,8 @@ namespace CPAM
         private List<AssetMetadata> _displayedAssets;
         private HashSet<string> _selectedAssetIds;
         private bool _isDragging = false;
+        private string _currentDragTempDir = "";
+        private System.DateTime _lastDragStartTime = System.DateTime.MinValue;
 
         // UI state
         private string _libraryPath = "";
@@ -80,6 +83,9 @@ namespace CPAM
 
         private void OnGUI()
         {
+            // Check if we should clean up old drag-drop temp files
+            CleanupOldDragTempFilesIfNeeded();
+
             DrawToolbar();
             EditorGUILayout.Space();
 
@@ -293,53 +299,130 @@ namespace CPAM
 
             var thumbnailRect = GUILayoutUtility.GetRect(ThumbnailSize, ThumbnailSize);
 
-            // Draw thumbnail button with selection border
-            var buttonStyle = new GUIStyle(EditorStyles.label)
-            {
-                border = new RectOffset(isSelected ? 3 : 0, isSelected ? 3 : 0, isSelected ? 3 : 0, isSelected ? 3 : 0)
-            };
+            // ===== DRAG-AND-DROP AND CLICK HANDLING =====
+            int controlID = GUIUtility.GetControlID(FocusType.Passive, thumbnailRect);
+            Event evt = Event.current;
+            EventType eventType = evt.GetTypeForControl(controlID);
 
-            if (GUI.Button(thumbnailRect, thumbnail ?? Texture2D.whiteTexture, buttonStyle))
+            switch (eventType)
             {
-                if (Event.current.control || Event.current.command)
-                {
-                    // Ctrl+click: toggle selection
+                case EventType.MouseDown:
+                    if (thumbnailRect.Contains(evt.mousePosition) && evt.button == 0)
+                    {
+                        // Ensure this asset is selected when starting drag
+                        if (!_selectedAssetIds.Contains(asset.id))
+                        {
+                            if (!evt.control && !evt.command)
+                            {
+                                _selectedAssetIds.Clear();
+                            }
+                            _selectedAssetIds.Add(asset.id);
+                        }
+
+                        // Take control ownership for drag-and-drop
+                        GUIUtility.hotControl = controlID;
+                        _isDragging = false;
+                        evt.Use();
+                    }
+                    break;
+
+                case EventType.MouseDrag:
+                    if (GUIUtility.hotControl == controlID && !_isDragging)
+                    {
+                        // Get selected assets to drag
+                        var selectedAssets = _displayedAssets
+                            .Where(a => _selectedAssetIds.Contains(a.id))
+                            .ToList();
+
+                        if (selectedAssets.Count > 0)
+                        {
+                            _isDragging = true;
+
+                            // Extract assets to temporary files
+                            var tempFilePaths = ExtractAssetsToTempForDragDrop(selectedAssets);
+
+                            if (tempFilePaths.Length > 0)
+                            {
+                                // Start drag operation with file paths
+                                DragAndDrop.PrepareStartDrag();
+                                DragAndDrop.paths = tempFilePaths;
+                                DragAndDrop.StartDrag($"Dragging {selectedAssets.Count} asset(s)");
+
+                                // Release control immediately after starting drag
+                                GUIUtility.hotControl = 0;
+                                evt.Use();
+                            }
+                            else
+                            {
+                                // Failed to prepare drag
+                                GUIUtility.hotControl = 0;
+                                _isDragging = false;
+                            }
+                        }
+                    }
+                    break;
+
+                case EventType.MouseUp:
+                    if (GUIUtility.hotControl == controlID)
+                    {
+                        GUIUtility.hotControl = 0;
+
+                        // Only count as click if we weren't dragging
+                        if (!_isDragging && thumbnailRect.Contains(evt.mousePosition))
+                        {
+                            if (evt.control || evt.command)
+                            {
+                                // Ctrl+click: toggle selection
+                                if (isSelected)
+                                {
+                                    _selectedAssetIds.Remove(asset.id);
+                                }
+                                else
+                                {
+                                    _selectedAssetIds.Add(asset.id);
+                                }
+                            }
+                            else
+                            {
+                                // Regular click: deselect if already sole selection, else select
+                                if (isSelected && _selectedAssetIds.Count == 1)
+                                {
+                                    _selectedAssetIds.Remove(asset.id);
+                                }
+                                else
+                                {
+                                    _selectedAssetIds.Clear();
+                                    _selectedAssetIds.Add(asset.id);
+                                }
+                            }
+                        }
+                        _isDragging = false;
+                        evt.Use();
+                    }
+                    break;
+
+                case EventType.Repaint:
+                    // Draw the thumbnail texture
+                    GUI.DrawTexture(thumbnailRect, thumbnail ?? Texture2D.whiteTexture);
+
+                    // Draw selection border if selected
                     if (isSelected)
                     {
-                        _selectedAssetIds.Remove(asset.id);
+                        Handles.BeginGUI();
+                        Handles.color = Color.green;
+                        Handles.DrawSolidRectangleWithOutline(thumbnailRect, Color.clear, Color.green);
+                        Handles.EndGUI();
                     }
-                    else
-                    {
-                        _selectedAssetIds.Add(asset.id);
-                    }
-                }
-                else
-                {
-                    // Regular click: toggle if already selected, otherwise select only this
-                    if (isSelected && _selectedAssetIds.Count == 1)
-                    {
-                        // Deselect if clicking the same item
-                        _selectedAssetIds.Remove(asset.id);
-                    }
-                    else
-                    {
-                        // Select only this asset
-                        _selectedAssetIds.Clear();
-                        _selectedAssetIds.Add(asset.id);
-                    }
-                }
-            }
+                    break;
 
-            // Draw selection border if selected
-            if (isSelected)
-            {
-                GUI.color = Color.green;
-                GUI.Box(thumbnailRect, "", new GUIStyle(GUI.skin.box) { border = new RectOffset(2, 2, 2, 2) });
-                GUI.color = Color.white;
+                case EventType.DragExited:
+                    if (GUIUtility.hotControl == controlID)
+                    {
+                        GUIUtility.hotControl = 0;
+                        _isDragging = false;
+                    }
+                    break;
             }
-
-            // Handle drag-and-drop from library to project
-            HandleLibraryToProjectDragDrop(thumbnailRect, asset);
 
             EditorGUILayout.EndHorizontal();
 
@@ -493,52 +576,125 @@ namespace CPAM
         }
 
         /// <summary>
-        /// Handle drag-and-drop from library window to project window.
-        /// Initiates drag operation when asset card is dragged.
+        /// Extract selected assets to temporary files for drag-and-drop.
+        /// Returns an array of file paths that can be dragged to the Project window.
         /// </summary>
-        private void HandleLibraryToProjectDragDrop(Rect cardRect, AssetMetadata asset)
+        private string[] ExtractAssetsToTempForDragDrop(List<AssetMetadata> assets)
         {
-            var evt = Event.current;
-
-            switch (evt.type)
+            try
             {
-                case EventType.MouseDown:
-                    if (cardRect.Contains(evt.mousePosition))
+                // Create a unique temp directory for this drag operation
+                _currentDragTempDir = Path.Combine(
+                    Path.GetTempPath(),
+                    "CPAM_DragDrop",
+                    System.Guid.NewGuid().ToString()
+                );
+
+                if (!Directory.Exists(_currentDragTempDir))
+                {
+                    Directory.CreateDirectory(_currentDragTempDir);
+                }
+
+                var tempFilePaths = new List<string>();
+
+                // Extract each selected asset to the temp directory
+                foreach (var asset in assets)
+                {
+                    try
                     {
-                        // Ensure this asset is selected when starting drag
-                        if (!_selectedAssetIds.Contains(asset.id))
+                        var assetData = _loader.GetAssetFile(asset);
+                        if (assetData == null || assetData.Length == 0)
                         {
-                            _selectedAssetIds.Clear();
-                            _selectedAssetIds.Add(asset.id);
+                            LibraryUtilities.LogWarning($"Could not extract asset data for: {asset.name}");
+                            continue;
                         }
-                        _isDragging = false;
-                    }
-                    break;
 
-                case EventType.MouseDrag:
-                    if (!_isDragging && cardRect.Contains(evt.mousePosition))
+                        // Preserve the folder structure from the library in the temp directory
+                        // Example: library has "assets/ui/RoundRect_50.png"
+                        // Extract to: temp/ui/RoundRect_50.png
+                        // This way Unity will create Assets/ui/ folder automatically during import
+
+                        var relativePath = asset.relativePath;
+
+                        // Remove the leading "assets/" or "assets\" folder if present
+                        if (relativePath.StartsWith("assets/", System.StringComparison.OrdinalIgnoreCase))
+                        {
+                            relativePath = relativePath.Substring("assets/".Length);
+                        }
+                        else if (relativePath.StartsWith("assets\\", System.StringComparison.OrdinalIgnoreCase))
+                        {
+                            relativePath = relativePath.Substring("assets\\".Length);
+                        }
+
+                        // Normalize path separators for this OS
+                        relativePath = relativePath.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+
+                        var tempFilePath = Path.Combine(_currentDragTempDir, relativePath);
+                        var tempFileDir = Path.GetDirectoryName(tempFilePath);
+
+                        // Create subdirectories if they don't exist
+                        if (!Directory.Exists(tempFileDir))
+                        {
+                            Directory.CreateDirectory(tempFileDir);
+                        }
+
+                        // Write the asset file to temp location with preserved structure
+                        File.WriteAllBytes(tempFilePath, assetData);
+                        tempFilePaths.Add(tempFilePath);
+
+                        LibraryUtilities.Log($"Extracted for drag: {Path.GetFileName(tempFilePath)}");
+                    }
+                    catch (Exception ex)
                     {
-                        // Start drag
-                        var selectedAssets = _displayedAssets.Where(a => _selectedAssetIds.Contains(a.id)).ToList();
-
-                        if (selectedAssets.Count > 0)
-                        {
-                            _isDragging = true;
-
-                            // Prepare drag operation
-                            DragAndDrop.PrepareStartDrag();
-                            DragAndDrop.SetGenericData("CPAM_AssetImport", selectedAssets);
-                            DragAndDrop.StartDrag($"Dragging {selectedAssets.Count} asset(s)");
-                            DragAndDrop.visualMode = DragAndDropVisualMode.Copy;
-                            evt.Use();
-                        }
+                        LibraryUtilities.LogWarning($"Failed to extract asset {asset.name}: {ex.Message}");
                     }
-                    break;
+                }
 
-                case EventType.DragExited:
-                case EventType.MouseUp:
-                    _isDragging = false;
-                    break;
+                // Record when this drag started for cleanup timing
+                if (tempFilePaths.Count > 0)
+                {
+                    _lastDragStartTime = System.DateTime.Now;
+                }
+
+                return tempFilePaths.ToArray();
+            }
+            catch (Exception ex)
+            {
+                LibraryUtilities.LogError($"Failed to prepare assets for drag-drop: {ex.Message}");
+                return new string[0];
+            }
+        }
+
+        /// <summary>
+        /// Check if old drag-drop temp files should be cleaned up.
+        /// Called from OnGUI to clean up after drag-drop operation completes.
+        /// </summary>
+        private void CleanupOldDragTempFilesIfNeeded()
+        {
+            // Only attempt cleanup if we have a temp directory to clean
+            if (string.IsNullOrEmpty(_currentDragTempDir) || !Directory.Exists(_currentDragTempDir))
+            {
+                return;
+            }
+
+            // Wait at least 3 seconds after drag started before cleaning up
+            // This gives Unity plenty of time to copy/import the files
+            if ((System.DateTime.Now - _lastDragStartTime).TotalSeconds < 3.0)
+            {
+                return; // Not ready to clean up yet
+            }
+
+            // Attempt cleanup
+            try
+            {
+                Directory.Delete(_currentDragTempDir, recursive: true);
+                LibraryUtilities.Log($"Cleaned up drag-drop temp files: {_currentDragTempDir}");
+                _currentDragTempDir = "";
+            }
+            catch (Exception ex)
+            {
+                // Silently ignore cleanup failures
+                LibraryUtilities.LogWarning($"Failed to cleanup temp drag files: {ex.Message}");
             }
         }
 
