@@ -25,6 +25,25 @@ namespace CPAM
         private string _currentDragTempDir = "";
         private System.DateTime _lastDragStartTime = System.DateTime.MinValue;
 
+        // Asset type colors for placeholders
+        private static readonly Dictionary<string, Color> AssetTypeColors = new Dictionary<string, Color>
+        {
+            { "Texture2D", new Color(0.8f, 0.6f, 0.2f, 1f) },      // Gold
+            { "Sprite", new Color(0.8f, 0.6f, 0.2f, 1f) },         // Gold
+            { "RenderTexture", new Color(0.8f, 0.6f, 0.2f, 1f) },  // Gold
+            { "GameObject", new Color(0.4f, 0.6f, 0.8f, 1f) },     // Light blue
+            { "MonoScript", new Color(0.2f, 0.7f, 0.2f, 1f) },     // Green
+            { "Material", new Color(0.7f, 0.5f, 0.8f, 1f) },       // Purple
+            { "Shader", new Color(0.7f, 0.5f, 0.8f, 1f) },         // Purple
+            { "ComputeShader", new Color(0.7f, 0.5f, 0.8f, 1f) },  // Purple
+            { "AudioClip", new Color(0.8f, 0.4f, 0.4f, 1f) },      // Red
+            { "Mesh", new Color(0.4f, 0.7f, 0.8f, 1f) },           // Cyan
+            { "AnimationClip", new Color(0.8f, 0.7f, 0.3f, 1f) },  // Yellow-gold
+            { "AnimatorController", new Color(0.8f, 0.7f, 0.3f, 1f) }, // Yellow-gold
+            { "SceneAsset", new Color(0.6f, 0.4f, 0.8f, 1f) },     // Violet
+            { "ScriptableObject", new Color(0.2f, 0.7f, 0.2f, 1f) }, // Green
+        };
+
         // UI state
         private string _libraryPath = "";
         private string _searchText = "";
@@ -309,19 +328,8 @@ namespace CPAM
                 case EventType.MouseDown:
                     if (thumbnailRect.Contains(evt.mousePosition) && evt.button == 0)
                     {
-                        // Ensure this asset is selected when starting drag
-                        if (!_selectedAssetIds.Contains(asset.id))
-                        {
-                            if (!evt.control && !evt.command)
-                            {
-                                _selectedAssetIds.Clear();
-                            }
-                            _selectedAssetIds.Add(asset.id);
-                        }
-
                         // Take control ownership for drag-and-drop
                         GUIUtility.hotControl = controlID;
-                        _isDragging = false;
                         evt.Use();
                     }
                     break;
@@ -336,27 +344,19 @@ namespace CPAM
 
                         if (selectedAssets.Count > 0)
                         {
-                            _isDragging = true;
-
                             // Extract assets to temporary files
                             var tempFilePaths = ExtractAssetsToTempForDragDrop(selectedAssets);
 
                             if (tempFilePaths.Length > 0)
                             {
+                                _isDragging = true;
+
                                 // Start drag operation with file paths
                                 DragAndDrop.PrepareStartDrag();
                                 DragAndDrop.paths = tempFilePaths;
                                 DragAndDrop.StartDrag($"Dragging {selectedAssets.Count} asset(s)");
 
-                                // Release control immediately after starting drag
-                                GUIUtility.hotControl = 0;
                                 evt.Use();
-                            }
-                            else
-                            {
-                                // Failed to prepare drag
-                                GUIUtility.hotControl = 0;
-                                _isDragging = false;
                             }
                         }
                     }
@@ -367,13 +367,15 @@ namespace CPAM
                     {
                         GUIUtility.hotControl = 0;
 
-                        // Only count as click if we weren't dragging
-                        if (!_isDragging && thumbnailRect.Contains(evt.mousePosition))
+                        // Handle as click if we didn't start a drag
+                        if (!_isDragging)
                         {
+                            bool wasSelected = _selectedAssetIds.Contains(asset.id);
+
                             if (evt.control || evt.command)
                             {
                                 // Ctrl+click: toggle selection
-                                if (isSelected)
+                                if (wasSelected)
                                 {
                                     _selectedAssetIds.Remove(asset.id);
                                 }
@@ -384,26 +386,39 @@ namespace CPAM
                             }
                             else
                             {
-                                // Regular click: deselect if already sole selection, else select
-                                if (isSelected && _selectedAssetIds.Count == 1)
+                                // Regular click:
+                                // - If clicking unselected → select it (clear others)
+                                // - If clicking selected and only one selected → deselect it
+                                // - If clicking selected but multiple selected → select only it
+                                if (wasSelected && _selectedAssetIds.Count == 1)
                                 {
+                                    // Deselect if it's the only selected item
                                     _selectedAssetIds.Remove(asset.id);
                                 }
                                 else
                                 {
+                                    // Select only this item
                                     _selectedAssetIds.Clear();
                                     _selectedAssetIds.Add(asset.id);
                                 }
                             }
                         }
+
                         _isDragging = false;
                         evt.Use();
                     }
                     break;
 
                 case EventType.Repaint:
-                    // Draw the thumbnail texture
-                    GUI.DrawTexture(thumbnailRect, thumbnail ?? Texture2D.whiteTexture);
+                    // Draw thumbnail or placeholder
+                    if (thumbnail != null)
+                    {
+                        DrawTextureWithAspectRatio(thumbnailRect, thumbnail);
+                    }
+                    else
+                    {
+                        DrawAssetTypePlaceholder(thumbnailRect, asset.type);
+                    }
 
                     // Draw selection border if selected
                     if (isSelected)
@@ -471,6 +486,97 @@ namespace CPAM
                 LibraryUtilities.LogWarning($"Failed to load thumbnail for {asset.name}: {ex.Message}");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Draw a texture while preserving its aspect ratio within the given rect.
+        /// The texture is centered and scaled to fit without stretching.
+        /// </summary>
+        private void DrawTextureWithAspectRatio(Rect rect, Texture2D texture)
+        {
+            if (texture == null)
+            {
+                return;
+            }
+
+            // Calculate texture aspect ratio
+            float textureAspect = (float)texture.width / texture.height;
+
+            // Start by fitting to height
+            float scaledHeight = rect.height;
+            float scaledWidth = scaledHeight * textureAspect;
+
+            // If the width exceeds the rect, fit to width instead
+            if (scaledWidth > rect.width)
+            {
+                scaledWidth = rect.width;
+                scaledHeight = scaledWidth / textureAspect;
+            }
+
+            // Center the texture within the rect
+            float offsetX = (rect.width - scaledWidth) / 2;
+            float offsetY = (rect.height - scaledHeight) / 2;
+
+            Rect scaledRect = new Rect(rect.x + offsetX, rect.y + offsetY, scaledWidth, scaledHeight);
+
+            GUI.DrawTexture(scaledRect, texture);
+        }
+
+        /// <summary>
+        /// Draw a colored placeholder for assets without thumbnails.
+        /// Shows the asset type with a distinctive color.
+        /// </summary>
+        private void DrawAssetTypePlaceholder(Rect rect, string assetType)
+        {
+            // Get color for this asset type
+            Color placeholderColor = Color.gray;
+            if (AssetTypeColors.TryGetValue(assetType, out var color))
+            {
+                placeholderColor = color;
+            }
+
+            // Draw colored background
+            GUI.color = placeholderColor;
+            GUI.Box(rect, "");
+            GUI.color = Color.white;
+
+            // Draw asset type text in the center
+            var labelStyle = new GUIStyle(EditorStyles.label)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontStyle = FontStyle.Bold,
+                wordWrap = true,
+                fontSize = 9
+            };
+
+            // Abbreviate long type names
+            string displayType = AbbreviateAssetType(assetType);
+            GUI.Label(rect, displayType, labelStyle);
+        }
+
+        /// <summary>
+        /// Get a short abbreviation for an asset type.
+        /// </summary>
+        private string AbbreviateAssetType(string assetType)
+        {
+            return assetType switch
+            {
+                "Texture2D" => "TEX",
+                "Sprite" => "SPR",
+                "RenderTexture" => "RTEX",
+                "GameObject" => "PREFAB",
+                "MonoScript" => "C#",
+                "Material" => "MAT",
+                "Shader" => "SHDR",
+                "ComputeShader" => "CSHDR",
+                "AudioClip" => "SND",
+                "Mesh" => "MESH",
+                "AnimationClip" => "ANIM",
+                "AnimatorController" => "CTRL",
+                "SceneAsset" => "SCENE",
+                "ScriptableObject" => "SO",
+                _ => assetType.Length > 4 ? assetType.Substring(0, 4).ToUpper() : assetType.ToUpper()
+            };
         }
 
         private void DrawFooter()
