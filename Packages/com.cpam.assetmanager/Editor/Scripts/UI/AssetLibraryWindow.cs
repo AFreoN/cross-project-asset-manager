@@ -326,11 +326,20 @@ namespace CPAM
             switch (eventType)
             {
                 case EventType.MouseDown:
-                    if (thumbnailRect.Contains(evt.mousePosition) && evt.button == 0)
+                    if (thumbnailRect.Contains(evt.mousePosition))
                     {
-                        // Take control ownership for drag-and-drop
-                        GUIUtility.hotControl = controlID;
-                        evt.Use();
+                        if (evt.button == 0)
+                        {
+                            // Left-click: take control ownership for drag-and-drop
+                            GUIUtility.hotControl = controlID;
+                            evt.Use();
+                        }
+                        else if (evt.button == 1)
+                        {
+                            // Right-click: show context menu
+                            AssetContextMenu.Show(asset, _loader, _libraryPath, thumbnailRect);
+                            evt.Use();
+                        }
                     }
                     break;
 
