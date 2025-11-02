@@ -22,6 +22,12 @@ namespace CPAM
         // Audio preview state
         private AudioClip _audioClip;
 
+        // Text preview state
+        private string _cachedTextContent;
+        private string _cachedTextPath;
+        private Vector2 _textScrollPosition = Vector2.zero;
+        private const int MaxTextPreviewChars = 50000; // Limit for performance
+
         private const float PreviewSize = 300f;
         private const float WindowWidth = 900f;
         private const float WindowHeight = 650f;
@@ -119,6 +125,10 @@ namespace CPAM
             else if (IsShaderAsset(_asset.type))
             {
                 DrawShaderPreview(previewRect);
+            }
+            else if (IsTextAsset(_asset.type))
+            {
+                DrawTextPreview(previewRect);
             }
             else
             {
@@ -517,6 +527,95 @@ namespace CPAM
             EditorGUILayout.HelpBox("Shader assets cannot be visually previewed.\nOpen the file in the editor to view the code.", MessageType.Info);
         }
 
+        private void DrawTextPreview(Rect previewRect)
+        {
+            // Load text content if not cached
+            if (_cachedTextContent == null || _cachedTextPath != _asset.relativePath)
+            {
+                LoadTextContent();
+            }
+
+            if (string.IsNullOrEmpty(_cachedTextContent))
+            {
+                GUI.Label(previewRect, "Could not load text file", EditorStyles.centeredGreyMiniLabel);
+                EditorGUILayout.Space();
+                EditorGUILayout.HelpBox("Failed to load text file", MessageType.Warning);
+                return;
+            }
+
+            try
+            {
+                // Draw dark background
+                EditorGUI.DrawRect(previewRect, new Color(0.15f, 0.15f, 0.15f, 1f));
+
+                // Display text in a scrollable text area
+                var textStyle = new GUIStyle(EditorStyles.textArea)
+                {
+                    richText = false,
+                    wordWrap = true,
+                    fontSize = 10,
+                    padding = new RectOffset(4, 4, 4, 4)
+                };
+
+                // Calculate content dimensions
+                float contentWidth = previewRect.width - 20; // Account for scrollbar and padding
+                var textContent = new GUIContent(_cachedTextContent);
+                float contentHeight = textStyle.CalcHeight(textContent, contentWidth);
+
+                // Create virtual rect for scroll content
+                var virtualRect = new Rect(0, 0, contentWidth, contentHeight);
+
+                // Begin scroll view with proper content height
+                _textScrollPosition = GUI.BeginScrollView(previewRect, _textScrollPosition, virtualRect);
+
+                // Draw the text at origin within scroll view
+                GUI.TextArea(new Rect(0, 0, contentWidth, contentHeight), _cachedTextContent, textStyle);
+
+                GUI.EndScrollView();
+            }
+            catch (System.Exception ex)
+            {
+                LibraryUtilities.LogWarning($"Failed to render text preview: {ex.Message}");
+                GUI.Label(previewRect, "Could not render text", EditorStyles.centeredGreyMiniLabel);
+            }
+
+            EditorGUILayout.Space();
+            EditorGUILayout.HelpBox("Text File Preview", MessageType.Info);
+        }
+
+        private void LoadTextContent()
+        {
+            _cachedTextContent = null;
+            _cachedTextPath = null;
+
+            try
+            {
+                var textData = _loader.GetAssetFile(_asset);
+                if (textData == null || textData.Length == 0)
+                {
+                    LibraryUtilities.LogWarning("Could not load text file data");
+                    return;
+                }
+
+                // Convert bytes to string using UTF-8 encoding
+                _cachedTextContent = System.Text.Encoding.UTF8.GetString(textData);
+
+                // Limit content size for performance
+                if (_cachedTextContent.Length > MaxTextPreviewChars)
+                {
+                    _cachedTextContent = _cachedTextContent.Substring(0, MaxTextPreviewChars) +
+                        $"\n\n... (truncated - file too large, showing {MaxTextPreviewChars} chars)";
+                }
+
+                _cachedTextPath = _asset.relativePath;
+                LibraryUtilities.Log($"Loaded text file: {_asset.name}");
+            }
+            catch (System.Exception ex)
+            {
+                LibraryUtilities.LogError($"Failed to load text file: {ex.Message}");
+            }
+        }
+
         private void DrawTextureWithAspectRatio(Rect rect, Texture2D texture)
         {
             if (texture == null)
@@ -636,6 +735,12 @@ namespace CPAM
         private bool IsShaderAsset(string type)
         {
             return type == "Shader" || type == "ComputeShader";
+        }
+
+        private bool IsTextAsset(string type)
+        {
+            return type == "MonoScript" || type == "TextFile" || type == "Text" ||
+                   type == "TextAsset" || type == "JSON" || type == "XML" || type == "YAML";
         }
 
         private void OnDestroy()
