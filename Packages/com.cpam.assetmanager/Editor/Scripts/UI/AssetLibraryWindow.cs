@@ -15,7 +15,7 @@ namespace CPAM
         // Constants
         private const float ThumbnailSize = 80f;
         private const float CardPadding = 10f;
-        private const int ColumnsPerRow = 3;
+        private const float MinCardWidth = 100f; // Minimum width for a card (thumbnail + padding)
 
         // Data
         private AssetLibraryLoader _loader;
@@ -24,6 +24,11 @@ namespace CPAM
         private bool _isDragging = false;
         private string _currentDragTempDir = "";
         private System.DateTime _lastDragStartTime = System.DateTime.MinValue;
+
+        // Auto-reload functionality
+        private bool _autoReload = false;
+        private FileSystemWatcher _fileWatcher;
+        private bool _needsReload = false;
 
         // Asset type colors for placeholders
         private static readonly Dictionary<string, Color> AssetTypeColors = new Dictionary<string, Color>
@@ -78,6 +83,7 @@ namespace CPAM
 
             // Load last used library path from preferences
             _libraryPath = EditorPrefs.GetString("CPAM.LastLibraryPath", "");
+            _autoReload = EditorPrefs.GetBool("CPAM.AutoReload", false);
 
             if (!string.IsNullOrEmpty(_libraryPath) && LibraryUtilities.IsValidLibraryFile(_libraryPath))
             {
@@ -98,12 +104,29 @@ namespace CPAM
                 DestroyImmediate(thumb);
             }
             _thumbnailCache.Clear();
+
+            // Dispose file watcher
+            if (_fileWatcher != null)
+            {
+                _fileWatcher.Dispose();
+                _fileWatcher = null;
+            }
         }
 
         private void OnGUI()
         {
             // Check if we should clean up old drag-drop temp files
             CleanupOldDragTempFilesIfNeeded();
+
+            // Handle auto-reload if needed
+            if (_needsReload && _autoReload)
+            {
+                _needsReload = false;
+                if (!string.IsNullOrEmpty(_libraryPath))
+                {
+                    LoadLibrary(_libraryPath);
+                }
+            }
 
             DrawToolbar();
             EditorGUILayout.Space();
@@ -148,6 +171,22 @@ namespace CPAM
                 {
                     LoadLibrary(_libraryPath);
                 }
+            }
+
+            if (GUILayout.Button("Create New", EditorStyles.toolbarButton, GUILayout.Width(80)))
+            {
+                CreateNewLibraryDialog.ShowDialog();
+            }
+
+            GUILayout.FlexibleSpace();
+
+            EditorGUILayout.LabelField("Auto Reload:", GUILayout.Width(75));
+            var newAutoReload = EditorGUILayout.Toggle(_autoReload, GUILayout.Width(20));
+            if (newAutoReload != _autoReload)
+            {
+                _autoReload = newAutoReload;
+                EditorPrefs.SetBool("CPAM.AutoReload", _autoReload);
+                SetupFileWatcher();
             }
 
             EditorGUILayout.EndHorizontal();
@@ -255,15 +294,23 @@ namespace CPAM
                 return;
             }
 
+            // Calculate dynamic columns based on window width
+            // Account for: window padding, scrollbar, margins, and EditorGUILayout padding
+            float availableWidth = position.width * 0.5f; // Use 50% of window width to account for all margins
+            float cardWidth = ThumbnailSize + CardPadding * 2;
+            float spacingBetweenCards = 4f; // Unity's default horizontal spacing
+            float effectiveCardWidth = cardWidth + spacingBetweenCards;
+            int columnsPerRow = Mathf.Max(1, Mathf.FloorToInt((availableWidth + spacingBetweenCards) / effectiveCardWidth));
+
             var rowAssets = new List<AssetMetadata>();
 
             for (int i = 0; i < _displayedAssets.Count; i++)
             {
                 rowAssets.Add(_displayedAssets[i]);
 
-                if (rowAssets.Count == ColumnsPerRow || i == _displayedAssets.Count - 1)
+                if (rowAssets.Count == columnsPerRow || i == _displayedAssets.Count - 1)
                 {
-                    DrawAssetRow(rowAssets);
+                    DrawAssetRow(rowAssets, columnsPerRow);
                     rowAssets.Clear();
                 }
             }
@@ -271,7 +318,7 @@ namespace CPAM
             GUILayout.EndScrollView();
         }
 
-        private void DrawAssetRow(List<AssetMetadata> assets)
+        private void DrawAssetRow(List<AssetMetadata> assets, int columnsPerRow)
         {
             EditorGUILayout.BeginHorizontal();
 
@@ -281,7 +328,7 @@ namespace CPAM
             }
 
             // Add empty cards to fill the row
-            for (int i = assets.Count; i < ColumnsPerRow; i++)
+            for (int i = assets.Count; i < columnsPerRow; i++)
             {
                 GUILayout.Space(ThumbnailSize + CardPadding * 2);
             }
@@ -617,6 +664,9 @@ namespace CPAM
                     RefreshDisplayedAssets();
                     EditorUtility.DisplayProgressBar("Loading Library", "Loading thumbnails...", 0.8f);
                     PreloadThumbnails();
+
+                    // Setup file watcher if auto-reload is enabled
+                    SetupFileWatcher();
                 }
                 else
                 {
@@ -627,6 +677,46 @@ namespace CPAM
             {
                 EditorUtility.ClearProgressBar();
             }
+        }
+
+        private void SetupFileWatcher()
+        {
+            // Dispose existing watcher
+            if (_fileWatcher != null)
+            {
+                _fileWatcher.Dispose();
+                _fileWatcher = null;
+            }
+
+            // Only setup if auto-reload is enabled and we have a valid library path
+            if (!_autoReload || string.IsNullOrEmpty(_libraryPath) || !File.Exists(_libraryPath))
+            {
+                return;
+            }
+
+            try
+            {
+                var directory = Path.GetDirectoryName(_libraryPath);
+                var fileName = Path.GetFileName(_libraryPath);
+
+                _fileWatcher = new FileSystemWatcher(directory, fileName);
+                _fileWatcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size;
+                _fileWatcher.Changed += OnLibraryFileChanged;
+                _fileWatcher.EnableRaisingEvents = true;
+
+                LibraryUtilities.Log($"File watcher enabled for: {_libraryPath}");
+            }
+            catch (Exception ex)
+            {
+                LibraryUtilities.LogWarning($"Failed to setup file watcher: {ex.Message}");
+            }
+        }
+
+        private void OnLibraryFileChanged(object sender, FileSystemEventArgs e)
+        {
+            // Set flag to reload on next OnGUI
+            _needsReload = true;
+            Repaint();
         }
 
         private void RefreshDisplayedAssets()
